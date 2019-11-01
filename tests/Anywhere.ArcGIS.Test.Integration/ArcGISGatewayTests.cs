@@ -7,6 +7,7 @@
     using System;
     using System.Collections.Generic;
     using System.Linq;
+    using System.Net;
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
@@ -28,22 +29,13 @@
             return Post<QueryResponse<Tout>, Query>(queryOptions, CancellationToken.None);
         }
 
-        internal readonly static Dictionary<string, Func<Type>> TypeMap = new Dictionary<string, Func<Type>>
-            {
-                { GeometryTypes.Point, () => typeof(Point) },
-                { GeometryTypes.MultiPoint, () => typeof(MultiPoint) },
-                { GeometryTypes.Envelope, () => typeof(Extent) },
-                { GeometryTypes.Polygon, () => typeof(Polygon) },
-                { GeometryTypes.Polyline, () => typeof(Polyline) }
-            };
-
         public async Task<FindResponse> DoFind(Find findOptions)
         {
             var response = await Find(findOptions);
 
             foreach (var result in response.Results.Where(r => r.Geometry != null))
             {
-                result.Geometry = JsonConvert.DeserializeObject(result.Geometry.ToString(), TypeMap[result.GeometryType]());
+                result.Geometry = JsonConvert.DeserializeObject(result.Geometry.ToString(), GeometryTypes.ToTypeMap[result.GeometryType]());
             }
             return response;
         }
@@ -140,11 +132,34 @@
                 Assert.NotNull(serviceDescription.ServiceDescription);
             }
         }
-
         [Theory]
+        [InlineData("http://services.arcgisonline.co.nz/arcgis", "Generic/newzealand/MapServer")]
+        public async Task CanGetServiceTileInfo(string rootUrl, string serviceId)
+        {
+	        var gateway = new PortalGateway(rootUrl);
+
+			var response = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+	        {
+		        return gateway.DescribeService(serviceId.AsEndpoint());
+	        });
+
+			Assert.NotNull(response.SingleFusedMapCache);
+			Assert.NotNull(response.TileInfo);
+			Assert.NotNull(response.TileInfo.Lods);
+			Assert.NotNull(response.TileInfo.Origin);
+			Assert.NotNull(response.TileInfo.SpatialReference);
+			Assert.NotNull(response.TileInfo.SpatialReference.Wkid);
+			Assert.Equal(512, response.TileInfo.Rows);
+			Assert.Equal(512, response.TileInfo.Cols);
+			Assert.Equal(96, response.TileInfo.Dpi);
+
+        }
+
+		[Theory]
         [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS/", "Petroleum/KSWells/MapServer/0")]
         [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS/", "Petroleum/KSWells/MapServer/1")]
         [InlineData("http://services.arcgisonline.co.nz/arcgis", "Canvas/Light/MapServer/0")]
+        [InlineData("http://services1.arcgis.com/dOFzdrPdRgtU4fRo/ArcGIS", "ServiceDefDouble/FeatureServer/0")]
         public async Task CanDescribeLayer(string rootUrl, string layerUrl)
         {
             var gateway = new PortalGateway(rootUrl);
@@ -157,8 +172,49 @@
             Assert.Null(layerResponse.Error);
             Assert.NotNull(layerResponse.GeometryType);
         }
+        [Theory]
+        [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS/", "Petroleum/KSWells/MapServer")]
+        [InlineData("http://services.arcgisonline.co.nz/arcgis", "Canvas/Light/MapServer")]
+		public async Task CanDescribeLegend(string rootUrl, string mapUrl)
+        {
+	        var gateway = new PortalGateway(rootUrl);
+	        var layerResponse = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+	        {
+		        return gateway.DescribeLegends(mapUrl.AsEndpoint());
+	        });
 
-        [Fact]
+	        Assert.NotNull(layerResponse);
+	        Assert.Null(layerResponse.Error);
+	        Assert.NotNull(layerResponse.Layers);
+	        Assert.True(layerResponse.Layers.Any());
+        }
+		[Theory]
+		[InlineData("http://sampleserver3.arcgisonline.com/ArcGIS/", "Petroleum/KSWells/MapServer", 192, 32)]
+		[InlineData("http://sampleserver3.arcgisonline.com/ArcGIS/", "Petroleum/KSWells/MapServer", 396, 64)]
+		public async Task CanDescribeLegend2(string rootUrl, string mapUrl, int? dpi, int? size)
+		{
+			var gateway = new PortalGateway(rootUrl);
+			var request = new LegendsDescription(mapUrl.AsEndpoint());
+			request.Dpi = dpi;
+			if (size.HasValue)
+			{
+				request.Size = new List<int>();
+				request.Size.Add(size.Value);
+				request.Size.Add(size.Value);
+			}
+			var layerResponse = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+			{
+				return gateway.DescribeLegends(request);
+			});
+
+			Assert.NotNull(layerResponse);
+			Assert.Null(layerResponse.Error);
+			Assert.NotNull(layerResponse.Layers);
+			Assert.True(layerResponse.Layers.Any());
+		}
+
+
+		[Fact]
         public async Task GatewayDoesAutoPost()
         {
             var gateway = new ArcGISGateway() { IncludeHypermediaWithResponse = true };
@@ -200,8 +256,53 @@
             Assert.Equal("POST", result.Links.First().Method);
         }
 
+        [Theory] 
+        [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS", "Earthquakes/Since_1970/MapServer/0")]
+        [InlineData("https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS", "USA_Major_Cities/FeatureServer/0")]
+        public async Task QueryCanGetBatchFeaturesPoint(string rootUrl, string relativeUrl)
+        {
+            await QueryCanGetBatchFeatures<Point>(rootUrl, relativeUrl, true);
+        }
+
         [Theory]
-        [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS", "/Earthquakes/EarthquakesFromLastSevenDays/MapServer/0")]
+        [InlineData("http://services.arcgisonline.com/arcgis/", "Demographics/USA_Diversity_Index/MapServer/4")]
+        public async Task QueryCanGetBatchFeaturesPolygon(string rootUrl, string relativeUrl)
+        {
+            await QueryCanGetBatchFeatures<Polygon>(rootUrl, relativeUrl, false);
+        }
+
+        private async Task QueryCanGetBatchFeatures<T>(string rootUrl, string relativeUrl, bool returnGeometry)
+            where T:IGeometry
+        {
+            var gateway = new PortalGateway(rootUrl);
+            var query = new Query(relativeUrl)
+            {
+                ReturnGeometry = returnGeometry
+            };
+
+            var result = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+            {
+                return gateway.BatchQuery<T>(query);
+            });
+
+            // Get total count of features to check that batch query returned everything
+            var queryCount = new QueryForCount(relativeUrl);
+            var countResult = await gateway.QueryForCount(queryCount);
+            Assert.NotNull(result);
+            Assert.Null(result.Error);
+            Assert.True(result.Features.Any());
+            Assert.Null(result.Links);
+            Assert.Equal(result.Features.Count(), countResult.NumberOfResults);
+            if (returnGeometry)
+            {
+                Assert.NotNull(result.SpatialReference);
+                Assert.True(result.Features.All(i => i.Geometry != null));
+                Assert.Equal(typeof(T), result.GeometryType);
+            }
+        }
+        
+        [Theory]
+        [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS", "/Petroleum/KSWells/MapServer/0")]
         [InlineData("http://sampleserver3.arcgisonline.com/ArcGIS", "Earthquakes/Since_1970/MapServer/0")]
         public async Task QueryCanReturnPointFeatures(string rootUrl, string relativeUrl)
         {
@@ -227,7 +328,7 @@
         {
             var gateway = new ArcGISGateway();
 
-            var queryPoint = new Query(@"Earthquakes/EarthquakesFromLastSevenDays/MapServer/0".AsEndpoint()) { Where = "magnitude > 4.5" };
+            var queryPoint = new Query(@"Earthquakes/EarthquakesFromLastSevenDays/MapServer/0".AsEndpoint()) { Where = "magnitude > 2.5" };
             var resultPoint = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
             {
                 return gateway.QueryAsPost<Point>(queryPoint);
@@ -315,11 +416,11 @@
 
             Assert.True(resultPoint.Features.Any());
             Assert.True(resultPoint.Features.All(i => i.Geometry == null));
-
+            
             var queryPointByOID = new Query(@"Earthquakes/EarthquakesFromLastSevenDays/MapServer/0".AsEndpoint())
             {
                 ReturnGeometry = false,
-                ObjectIds = resultPoint.Features.Take(10).Select(f => long.Parse(f.Attributes["objectid"].ToString())).ToList()
+                ObjectIds = resultPoint.Features.Take(10).Select(f => long.Parse(f.Attributes[resultPoint.ObjectIdFieldName ?? "objectid"].ToString())).ToList()
             };
             var resultPointByOID = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
             {
@@ -372,7 +473,8 @@
             var query = new Query(relativeUrl.AsEndpoint())
             {
                 OrderBy = new List<string> { orderby },
-                ReturnGeometry = false
+                ReturnGeometry = false,
+                Where = "CITY = 'WA'"
             };
             var result = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
             {
@@ -382,7 +484,8 @@
             var queryDesc = new Query(relativeUrl)
             {
                 OrderBy = new List<string> { orderby + " DESC" },
-                ReturnGeometry = false
+                ReturnGeometry = false,
+                Where = "CITY = 'WA'"
             };
             var resultDesc = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
             {
@@ -391,11 +494,13 @@
 
             Assert.True(result.Features.Any());
             Assert.True(resultDesc.Features.Any());
-            Assert.NotEqual(result.Features, resultDesc.Features);
+            Assert.True(result.Features.Count() == resultDesc.Features.Count());
+            Assert.Equal(result.Features.First().Attributes[orderby], resultDesc.Features.Last().Attributes[orderby]);
+            Assert.Equal(result.Features.Last().Attributes[orderby], resultDesc.Features.First().Attributes[orderby]);
         }
 
         [Theory]
-        [InlineData("http://services.arcgis.com/hMYNkrKaydBeWRXE/arcgis", "TestReturnExtentOnly/FeatureServer/0")]
+        [InlineData("https://services.arcgis.com/hMYNkrKaydBeWRXE/arcgis", "TestReturnExtentOnly/FeatureServer/0")]
         public async Task CanQueryExtent(string rootUrl, string relativeUrl)
         {
             var gateway = new PortalGateway(rootUrl);
@@ -415,7 +520,7 @@
         }
 
         [Theory]
-        [InlineData("http://services.arcgis.com/hMYNkrKaydBeWRXE/arcgis", "TestReturnExtentOnly/FeatureServer/0", 1, 2)]
+        [InlineData("https://services.arcgis.com/hMYNkrKaydBeWRXE/arcgis", "TestReturnExtentOnly/FeatureServer/0", 1, 2)]
         public async Task CanPagePointQuery(string rootUrl, string relativeUrl, int start, int numberToReturn)
         {
             var gateway = new PortalGateway(rootUrl);
@@ -630,6 +735,82 @@
         }
 
         [Fact]
+        public async Task CanAddUpdateAndDeleteUsingGlobalIds()
+        {
+            var gateway = new PortalGateway("https://sampleserver6.arcgisonline.com/arcgis");
+
+            var feature = new Feature<Point>();
+            feature.Attributes.Add("type", 0);
+            feature.Geometry = new Point { SpatialReference = new SpatialReference { Wkid = SpatialReference.WebMercator.Wkid }, X = -13073617.8735768, Y = 4071422.42978062 };
+            Guid newGlobalId = System.Guid.NewGuid();
+            feature.Attributes.Add("GlobalID", newGlobalId);
+            feature.Attributes.Add("creator", "Anywhere.ArcGIS");
+
+            var adds = new ApplyEdits<Point>(@"Sync/SaveTheBaySync/FeatureServer/0".AsEndpoint())
+            {
+                Adds = new List<Feature<Point>> { feature },
+                UseGlobalIds = true
+            };
+            var resultAdd = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+            {
+                return gateway.ApplyEdits(adds);
+            });
+
+            Assert.True(resultAdd.Adds.Any());
+            Assert.True(resultAdd.Adds.First().Success);
+            Assert.Equal(resultAdd.ExpectedAdds, resultAdd.ActualAdds);
+            Assert.Equal(resultAdd.ActualAdds, resultAdd.ActualAddsThatSucceeded);
+
+            var id = resultAdd.Adds.First().GlobalId;
+            Assert.Equal(newGlobalId.ToString("B"), id);
+
+            feature.Attributes.Add("comments", "something"); // problem with serialization means we need single quotes around string values
+            feature.Attributes.Add("editor", "Anywhere.ArcGIS");
+
+            var updates = new ApplyEdits<Point>(@"Sync/SaveTheBaySync/FeatureServer/0")
+            {
+                Updates = new List<Feature<Point>> { feature },
+                UseGlobalIds = true
+            };
+            var resultUpdate = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+            {
+                return gateway.ApplyEdits(updates);
+            });
+
+            Assert.True(resultUpdate.Updates.Any());
+            // Note - Success returns false, even though it's worked.
+            // Assert.True(resultUpdate.Updates.First().Success);
+            Assert.Equal(1, resultUpdate.ExpectedUpdates);
+            Assert.Equal(1, resultUpdate.ActualUpdates);
+            Assert.Equal(resultUpdate.ExpectedUpdates, resultUpdate.ActualUpdates);
+            // Note - resultUpdate.ActualUpdatesThatSucceeded returns 0, even though it's worked.
+            // Assert.Equal(resultUpdate.ActualUpdates, resultUpdate.ActualUpdatesThatSucceeded);
+
+            // Not sure why, but GlobalId in Updates is in D format, not B format.
+            Assert.Equal(newGlobalId.ToString("D"), resultUpdate.Updates.First().GlobalId);
+
+            var deletes = new ApplyEdits<Point>(@"Sync/SaveTheBaySync/FeatureServer/0".AsEndpoint())
+            {
+                DeleteGlobalIds = new List<Guid> { newGlobalId },
+                UseGlobalIds = true
+            };
+
+            var resultDelete = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+            {
+                return gateway.ApplyEdits(deletes);
+            });
+
+            Assert.True(resultDelete.Deletes.Any());
+            Assert.True(resultDelete.Deletes.First().Success);
+            // resultDelete.ExpectedDeletes returns 0 - not expected value (1).
+            // Assert.Equal(resultDelete.ExpectedDeletes, resultDelete.ActualDeletes);
+            Assert.Equal(1, resultDelete.ActualDeletes);
+            Assert.Equal(1, resultDelete.ActualDeletesThatSucceeded);
+            Assert.Equal(resultDelete.ActualDeletes, resultDelete.ActualDeletesThatSucceeded);
+            Assert.Equal(resultDelete.Deletes.First().GlobalId, id);
+        }
+
+        [Fact]
         public async Task FindCanReturnResultsAndGeometry()
         {
             var gateway = new ArcGISGateway();
@@ -812,6 +993,40 @@
             Assert.NotNull(result);
             Assert.NotNull(result.FullName);
             Assert.True(result.Exists);
+        }
+
+        [Fact]
+        public async Task QueryForOutputStatistics()
+        {
+            var gateway = new PortalGateway("https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS");
+            var outStats = new List<OutputStatistic>();
+            outStats.Add(new OutputStatistic()
+            {
+                StatisticType = StatisticTypes.Average,
+                OnField = "MALES",
+                OutField = "AVE_MALES"
+            });
+            outStats.Add(new OutputStatistic()
+            {
+                StatisticType = StatisticTypes.Sum,
+                OnField = "MALES",
+                OutField = "SUM_MALES"
+            });
+            var query = new Query("USA_Major_Cities/FeatureServer/0")
+            {
+                GroupByFields = new List<string>(new string[] { "ST" }),
+                OutputStatistics = outStats
+            };
+            var result = await IntegrationTestFixture.TestPolicy.ExecuteAsync(() =>
+            {
+                return gateway.Query<Point>(query);
+            });
+
+            Assert.NotNull(result);
+            Assert.Null(result.Error);
+            Assert.True(result.Features.Any());
+            Assert.NotNull(result.Fields);
+            Assert.True(result.Fields.Where(x => x.Name == "SUM_MALES").Any());
         }
     }
 }

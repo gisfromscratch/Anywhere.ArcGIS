@@ -13,7 +13,7 @@
     /// </summary>
     public class FederatedTokenProvider : ITokenProvider, IDisposable
     {
-        static HttpClient _httpClient;
+        HttpClient _httpClient;
         protected readonly GenerateFederatedToken TokenRequest;
         Token _token;
         readonly ILog _logger;
@@ -26,21 +26,32 @@
         /// <param name="serverUrl"></param>
         /// <param name="serializer">Used to (de)serialize requests and responses</param>
         /// <param name="referer">Referer url to use for the token generation. For federated servers this will be the portal rootUrl</param>
-        public FederatedTokenProvider(ITokenProvider tokenProvider, string rootUrl, string serverUrl, ISerializer serializer = null, string referer = null)
-            : this(() => LogProvider.For<FederatedTokenProvider>(), tokenProvider, rootUrl, serverUrl, serializer, referer)
+        public FederatedTokenProvider(ITokenProvider tokenProvider, string rootUrl, string serverUrl, ISerializer serializer = null, string referer = null, Func<HttpClient> httpClientFunc = null)
+            : this(() => LogProvider.For<FederatedTokenProvider>(), tokenProvider, rootUrl, serverUrl, serializer, referer, httpClientFunc)
         { }
 
-        internal FederatedTokenProvider(Func<ILog> log, ITokenProvider tokenProvider, string rootUrl, string serverUrl, ISerializer serializer = null, string referer = null)
+        internal FederatedTokenProvider(Func<ILog> log, ITokenProvider tokenProvider, string rootUrl, string serverUrl, ISerializer serializer = null, string referer = null, Func<HttpClient> httpClientFunc = null)
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(tokenProvider), tokenProvider);
-            if (string.IsNullOrWhiteSpace(rootUrl)) throw new ArgumentNullException(nameof(rootUrl), "rootUrl is null.");
-            if (string.IsNullOrWhiteSpace(serverUrl)) throw new ArgumentNullException(nameof(serverUrl), "serverUrl is null.");
+            if (tokenProvider == null)
+            {
+                throw new ArgumentNullException(nameof(tokenProvider));
+            }
+
+            if (string.IsNullOrWhiteSpace(rootUrl))
+            {
+                throw new ArgumentNullException(nameof(rootUrl), "rootUrl is null.");
+            }
+
+            if (string.IsNullOrWhiteSpace(serverUrl))
+            {
+                throw new ArgumentNullException(nameof(serverUrl), "serverUrl is null.");
+            }
 
             Serializer = serializer ?? SerializerFactory.Get();
-            LiteGuard.Guard.AgainstNullArgument(nameof(Serializer), Serializer);
 
             RootUrl = rootUrl.AsRootUrl();
-            _httpClient = HttpClientFactory.Get();
+            var httpFunc = httpClientFunc ?? HttpClientFactory.Get;
+            _httpClient = httpFunc();
             TokenRequest = new GenerateFederatedToken(serverUrl, tokenProvider) { Referer = referer };
 
             _logger = log() ?? LogProvider.For<FederatedTokenProvider>();

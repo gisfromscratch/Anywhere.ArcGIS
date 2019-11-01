@@ -15,7 +15,7 @@ namespace Anywhere.ArcGIS.Common
     /// Envelopes
     /// </summary>
     /// <remarks>Starting at ArcGIS Server 10.1, geometries containing m and z values are supported</remarks>
-    public interface IGeometry
+    public interface IGeometry : ICloneable
     {
         /// <summary>
         /// The spatial reference can be defined using a well-known ID (wkid) or well-known text (wkt)
@@ -46,12 +46,12 @@ namespace Anywhere.ArcGIS.Common
     /// Spatial reference used for operations. If WKT is set then other properties are nulled
     /// </summary>
     [DataContract]
-    public class SpatialReference : IEquatable<SpatialReference>
+    public class SpatialReference : IEquatable<SpatialReference>, ICloneable
     {
         /// <summary>
         /// World Geodetic System 1984 (WGS84)
         /// </summary>
-        public static SpatialReference WGS84 = new SpatialReference
+        public readonly static SpatialReference WGS84 = new SpatialReference
         {
             Wkid = 4326,
             LatestWkid = 4326
@@ -60,7 +60,7 @@ namespace Anywhere.ArcGIS.Common
         /// <summary>
         /// WGS 1984 Web Mercator (Auxiliary Sphere)
         /// </summary>
-        public static SpatialReference WebMercator = new SpatialReference
+        public readonly static SpatialReference WebMercator = new SpatialReference
         {
             Wkid = 102100,
             LatestWkid = 3857
@@ -136,6 +136,18 @@ namespace Anywhere.ArcGIS.Common
                 return hashCode;
             }
         }
+
+        public object Clone()
+        {
+            return new SpatialReference
+            {
+                LatestVCSWkid = LatestVCSWkid,
+                LatestWkid = LatestWkid,
+                VCSWkid = VCSWkid,
+                Wkid = Wkid,
+                Wkt = string.IsNullOrWhiteSpace(Wkt) ? null : string.Copy(Wkt)
+            };
+        }
     }
 
     [DataContract]
@@ -198,6 +210,18 @@ namespace Anywhere.ArcGIS.Common
         {
             return new GeoJsonPoint { Type = "Point", Coordinates = new[] { X, Y } };
         }
+
+        public object Clone()
+        {
+            return new Point
+            {
+                X = X,
+                Y = Y,
+                M = M,
+                Z = Z,
+                SpatialReference = (SpatialReference)SpatialReference?.Clone()
+            };
+        }
     }
 
     [DataContract]
@@ -256,6 +280,17 @@ namespace Anywhere.ArcGIS.Common
         {
             return new GeoJsonLineString { Type = "MultiPoint", Coordinates = Points };
         }
+
+        public object Clone()
+        {
+            return new MultiPoint
+            {
+                HasM = HasM,
+                HasZ = HasZ,
+                Points = (PointCollection)Points?.Clone(),
+                SpatialReference = (SpatialReference)SpatialReference?.Clone()
+            };
+        }
     }
 
     [DataContract]
@@ -279,11 +314,19 @@ namespace Anywhere.ArcGIS.Common
             foreach (PointCollection path in Paths)
             {
                 if (extent == null)
+                {
                     extent = path.CalculateExtent(SpatialReference);
+                }
                 else
+                {
                     extent = extent.Union(path.CalculateExtent(SpatialReference));
+                }
             }
-            if (extent != null) extent.SpatialReference = SpatialReference;
+
+            if (extent != null)
+            {
+                extent.SpatialReference = SpatialReference;
+            }
 
             return extent;
         }
@@ -322,7 +365,33 @@ namespace Anywhere.ArcGIS.Common
 
         public IGeoJsonGeometry ToGeoJson()
         {
-            return Paths.Any() ? new GeoJsonLineString { Type = "LineString", Coordinates = Paths.First() } : null;
+            if (Paths == null || !Paths.Any())
+            {
+                return null;
+            }
+
+            var coordinates = new PointCollection();
+
+            foreach (PointCollection path in Paths)
+            {
+                foreach (var point in path)
+                {
+                    coordinates.Add(point);
+                }                
+            }
+
+            return new GeoJsonLineString { Type = "LineString", Coordinates = coordinates };
+        }
+
+        public object Clone()
+        {
+            return new Polyline
+            {
+                HasM = HasM,
+                HasZ = HasZ,
+                Paths = Paths?.Clone(),
+                SpatialReference = (SpatialReference)SpatialReference?.Clone()
+            };
         }
     }
 
@@ -337,29 +406,58 @@ namespace Anywhere.ArcGIS.Common
 
             foreach (var point in Points.Where(p => p != null))
             {
-                if (point.X < x || double.IsNaN(x)) x = point.X;
+                if (point.X < x || double.IsNaN(x))
+                {
+                    x = point.X;
+                }
 
-                if (point.Y < y || double.IsNaN(y)) y = point.Y;
+                if (point.Y < y || double.IsNaN(y))
+                {
+                    y = point.Y;
+                }
 
-                if (point.X > x1 || double.IsNaN(x1)) x1 = point.X;
+                if (point.X > x1 || double.IsNaN(x1))
+                {
+                    x1 = point.X;
+                }
 
-                if (point.Y > y1 || double.IsNaN(y1)) y1 = point.Y;
+                if (point.Y > y1 || double.IsNaN(y1))
+                {
+                    y1 = point.Y;
+                }
             }
+
             if (double.IsNaN(x) || double.IsNaN(y) || double.IsNaN(x1) || double.IsNaN(y1))
+            {
                 return null;
+            }
 
             return new Extent { XMin = x, YMin = y, XMax = x1, YMax = y1, SpatialReference = spatialReference };
         }
 
         public List<Point> Points
         {
-            get { return this.Select(point => point != null ? new Point { X = point.First(), Y = point.Last() } : null).ToList(); }
+            get
+            {
+                return this.Select(point => point != null ? new Point { X = point.First(), Y = point.Last() } : null)
+                    .Where(p => p != null)
+                    .ToList();
+            }
         }
 
+        public List<double[]> Clone()
+        {
+            return Points.Select(x => new double[] { x.X, x.Y }).ToList();
+        }
     }
 
     public class PointCollectionList : List<PointCollection>
-    { }
+    {
+        public PointCollectionList Clone()
+        {
+            return this;
+        }
+    }
 
     [DataContract]
     public class Polygon : IGeometry, IEquatable<Polygon>
@@ -382,11 +480,19 @@ namespace Anywhere.ArcGIS.Common
             foreach (var ring in Rings.Where(r => r != null))
             {
                 if (extent == null)
+                {
                     extent = ring.CalculateExtent(SpatialReference);
+                }
                 else
+                {
                     extent = extent.Union(ring.CalculateExtent(SpatialReference));
+                }
             }
-            if (extent != null && extent.SpatialReference == null) extent.SpatialReference = SpatialReference;
+
+            if (extent != null && extent.SpatialReference == null)
+            {
+                extent.SpatialReference = SpatialReference;
+            }
 
             return extent;
         }
@@ -427,6 +533,17 @@ namespace Anywhere.ArcGIS.Common
         {
             return new GeoJsonPolygon { Type = "Polygon", Coordinates = Rings };
         }
+
+        public object Clone()
+        {
+            return new Polygon
+            {
+                HasM = HasM,
+                HasZ = HasZ,
+                Rings = Rings?.Clone(),
+                SpatialReference = (SpatialReference)SpatialReference?.Clone()
+            };
+        }
     }
 
     [DataContract]
@@ -459,38 +576,68 @@ namespace Anywhere.ArcGIS.Common
 
         public Extent Union(Extent extent)
         {
-            if (extent == null) extent = this;
+            if (extent == null)
+            {
+                extent = this;
+            }
+
             if (!SpatialReference.Equals(extent.SpatialReference))
+            {
                 throw new ArgumentException("Spatial references must match for union operation.");
+            }
 
             var envelope = new Extent { SpatialReference = SpatialReference ?? extent.SpatialReference };
             if (double.IsNaN(XMin))
+            {
                 envelope.XMin = extent.XMin;
+            }
             else if (!double.IsNaN(extent.XMin))
+            {
                 envelope.XMin = Math.Min(extent.XMin, XMin);
+            }
             else
+            {
                 envelope.XMin = XMin;
+            }
 
             if (double.IsNaN(XMax))
+            {
                 envelope.XMax = extent.XMax;
+            }
             else if (!double.IsNaN(extent.XMax))
+            {
                 envelope.XMax = Math.Max(extent.XMax, XMax);
+            }
             else
+            {
                 envelope.XMax = XMax;
+            }
 
             if (double.IsNaN(YMin))
+            {
                 envelope.YMin = extent.YMin;
+            }
             else if (!double.IsNaN(extent.YMin))
+            {
                 envelope.YMin = Math.Min(extent.YMin, YMin);
+            }
             else
+            {
                 envelope.YMin = YMin;
+            }
 
             if (double.IsNaN(YMax))
+            {
                 envelope.YMax = extent.YMax;
+            }
             else if (!double.IsNaN(extent.YMax))
+            {
                 envelope.YMax = Math.Max(extent.YMax, YMax);
+            }
             else
+            {
                 envelope.YMax = YMax;
+            }
 
             return envelope;
         }
@@ -539,6 +686,18 @@ namespace Anywhere.ArcGIS.Common
                         new[]{ XMin, YMin }
                     }
                 }
+            };
+        }
+
+        public object Clone()
+        {
+            return new Extent
+            {
+                XMax = XMax,
+                XMin = XMin,
+                YMax = YMax,
+                YMin = YMin,
+                SpatialReference = (SpatialReference)SpatialReference?.Clone()
             };
         }
     }

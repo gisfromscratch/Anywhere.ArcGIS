@@ -19,9 +19,25 @@ namespace Anywhere.ArcGIS
     {
         public Operation.GenerateToken Encrypt(Operation.GenerateToken tokenRequest, byte[] exponent, byte[] modulus)
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(tokenRequest), tokenRequest);
-            LiteGuard.Guard.AgainstNullArgument(nameof(exponent), exponent);
-            LiteGuard.Guard.AgainstNullArgument(nameof(modulus), modulus);
+            if (tokenRequest == null)
+            {
+                throw new ArgumentNullException(nameof(tokenRequest));
+            }
+
+            if (exponent == null)
+            {
+                throw new ArgumentNullException(nameof(exponent));
+            }
+
+            if (modulus == null)
+            {
+                throw new ArgumentNullException(nameof(modulus));
+            }
+
+            if (tokenRequest.Encrypted == true)
+            {
+                return tokenRequest;
+            }
 
             using (var rsa = new System.Security.Cryptography.RSACryptoServiceProvider(512))
             {

@@ -20,7 +20,7 @@
         internal const string AGOPortalUrl = "https://www.arcgis.com/sharing/rest/";
         protected const string GeometryServerUrlRelative = "/Utilities/Geometry/GeometryServer";
         protected const string GeometryServerUrl = "https://utility.arcgisonline.com/arcgis/rest/services/Geometry/GeometryServer";
-        static HttpClient _httpClient;
+        HttpClient _httpClient;
         protected IEndpoint GeometryServiceIEndpoint;
         readonly ILog _logger;
 
@@ -44,17 +44,45 @@
                 throw new ArgumentNullException(nameof(rootUrl), "rootUrl is null.");
             }
 
-            var info = await new PortalGatewayBase(rootUrl, serializer: serializer, httpClientFunc: httpClientFunc).Info(ct);
+            var gateway = new PortalGateway(rootUrl, serializer: serializer, httpClientFunc: httpClientFunc);
+            var info = await gateway.Info(ct);
 
-            var result = new PortalGatewayBase(
+            if (info == null)
+            {
+                throw new Exception($"Unable to get ArcGIS Server information for {gateway.RootUrl}. Check the ArcGIS Server URL and try again.");
+            }
+
+            ITokenProvider tokenProvider = null;
+            if (!string.IsNullOrWhiteSpace(info.OwningSystemUrl) && (info.OwningSystemUrl.StartsWith("http://www.arcgis.com", StringComparison.OrdinalIgnoreCase) || info.OwningSystemUrl.StartsWith("https://www.arcgis.com", StringComparison.OrdinalIgnoreCase)))
+            {
+                tokenProvider = new ArcGISOnlineTokenProvider(username, password, serializer: serializer, httpClientFunc: httpClientFunc);
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(info.AuthenticationInfo?.TokenServicesUrl))
+                {
+                    if (!info.AuthenticationInfo.TokenServicesUrl.StartsWith(gateway.RootUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        tokenProvider = new FederatedTokenProvider(
+                            new ServerFederatedWithPortalTokenProvider(info.AuthenticationInfo.TokenServicesUrl.Replace("/generateToken", ""), username, password, serializer: serializer, httpClientFunc: httpClientFunc),
+                            info.AuthenticationInfo.TokenServicesUrl.Replace("/generateToken", ""),
+                            gateway.RootUrl,
+                            referer: info.AuthenticationInfo.TokenServicesUrl.Replace("/sharing/rest/generateToken", "/rest"), 
+                            serializer: serializer, 
+                            httpClientFunc: httpClientFunc);
+                    }
+                    else
+                    {
+                        tokenProvider = new TokenProvider(info.AuthenticationInfo?.TokenServicesUrl, username, password, serializer: serializer, httpClientFunc: httpClientFunc);
+                    }
+                }
+            }
+
+            return new PortalGatewayBase(
                 rootUrl,
-                tokenProvider: !string.IsNullOrWhiteSpace(info.OwningSystemUrl) && (info.OwningSystemUrl.StartsWith("http://www.arcgis.com", StringComparison.OrdinalIgnoreCase) || info.OwningSystemUrl.StartsWith("https://www.arcgis.com", StringComparison.OrdinalIgnoreCase))
-                    ? new ArcGISOnlineTokenProvider(username, password)
-                    : new TokenProvider(info.AuthenticationInfo?.TokenServicesUrl, username, password),
+                tokenProvider: tokenProvider,
                 serializer: serializer,
                 httpClientFunc: httpClientFunc);
-
-            return result;
         }
 
         /// <summary>
@@ -78,7 +106,7 @@
             RootUrl = rootUrl.AsRootUrl();
             TokenProvider = tokenProvider;
             Serializer = serializer ?? SerializerFactory.Get();
-            LiteGuard.Guard.AgainstNullArgument("Serializer", Serializer);
+
             var httpFunc = httpClientFunc ?? HttpClientFactory.Get;
             _httpClient = httpFunc();
             MaximumGetRequestLength = 2047;
@@ -165,13 +193,57 @@
         }
 
         /// <summary>
-        /// The feature resource represents a single feature in a layer in a map service.
+        /// Return the layer description details for the requested endpoint
         /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="layerFeature"></param>
+        /// <param name="layerEndpoint"></param>
         /// <param name="ct"></param>
-        /// <returns></returns>
-        public virtual Task<LayerFeatureResponse<T>> GetFeature<T>(LayerFeature layerFeature, CancellationToken ct = default(CancellationToken))
+        /// <returns>The layer description details</returns>
+        public virtual Task<ServiceLayerDescriptionResponse> DescribeLayer(IEndpoint layerEndpoint, CancellationToken ct = default(CancellationToken))
+        {
+            if (layerEndpoint == null)
+            {
+                throw new ArgumentNullException(nameof(layerEndpoint));
+            }
+
+            return Get<ServiceLayerDescriptionResponse, ServiceLayerDescription>(new ServiceLayerDescription(layerEndpoint), ct);
+        }
+
+        /// <summary>
+        /// Return the legend descriptions details for the requested endpoint
+        /// </summary>
+        /// <returns>The legend descriptions details</returns>
+        public virtual Task<LegendsDescriptionResponse> DescribeLegends(IEndpoint mapServiceEndpoint, CancellationToken ct = default(CancellationToken))
+        {
+	        if (mapServiceEndpoint == null)
+	        {
+		        throw new ArgumentNullException(nameof(mapServiceEndpoint));
+	        }
+
+	        return DescribeLegends(new LegendsDescription(mapServiceEndpoint), ct);
+        }
+
+        /// <summary>
+        /// Return the legend descriptions details for the requested endpoint
+        /// </summary>
+        /// <returns>The legend descriptions details</returns>
+        public virtual Task<LegendsDescriptionResponse> DescribeLegends(LegendsDescription legendDescriptionRequest, CancellationToken ct = default(CancellationToken))
+        {
+	        if (legendDescriptionRequest == null)
+	        {
+		        throw new ArgumentNullException(nameof(legendDescriptionRequest));
+			}
+
+			return Get<LegendsDescriptionResponse, LegendsDescription>(legendDescriptionRequest, ct);
+        }
+
+		/// <summary>
+		/// The feature resource represents a single feature in a layer in a map service.
+		/// </summary>
+		/// <typeparam name="T"></typeparam>
+		/// <param name="layerFeature"></param>
+		/// <param name="ct"></param>
+		/// <returns></returns>
+		public virtual Task<LayerFeatureResponse<T>> GetFeature<T>(LayerFeature layerFeature, CancellationToken ct = default(CancellationToken))
             where T : IGeometry
         {
             return Get<LayerFeatureResponse<T>, LayerFeature>(layerFeature, ct);
@@ -198,22 +270,41 @@
             if (result != null && result.Error == null && result.Features != null && result.Features.Any() && result.ExceededTransferLimit.HasValue && result.ExceededTransferLimit.Value == true)
             {
                 // need to get the remaining data since we went over the limit
+                var endpoint = queryOptions.Endpoint.RelativeUrl.Replace($"/{Operations.Query}", "").AsEndpoint();
+                var layerDesc = await DescribeLayer(endpoint, ct);
                 var batchSize = result.Features.Count();
                 var loop = 1;
                 var exceeded = true;
+
+                // if pagination isn't supported, need to track objectids returned
+                var originalWhere = queryOptions.Where;
+                var oidField = layerDesc.ObjectIdField ?? layerDesc.Fields.Where(a => a.Type == FieldDataTypes.EsriOID).Select(a => a.Name).First();
+                var oidList = result.Features.Select(x => x.ObjectID.ToString());
 
                 while (exceeded == true)
                 {
                     _logger.InfoFormat("Exceeded query transfer limit (found {0}), batching query for {1} - loop {2}", batchSize, queryOptions.RelativeUrl, loop);
                     var innerQueryOptions = queryOptions;
-                    innerQueryOptions.ResultOffset = batchSize * loop;
-                    innerQueryOptions.ResultRecordCount = batchSize;
+                    if (layerDesc.AdvancedQueryCapabilities.SupportsPagination)
+                    {
+                        // use Pagination
+                        innerQueryOptions.ResultOffset = batchSize * loop;
+                        innerQueryOptions.ResultRecordCount = batchSize;
+                    }
+                    else
+                    {
+                        // use list of OIDs to exclude
+                        innerQueryOptions.Where = $"({originalWhere}) AND ({oidField} not in ({string.Join(",", oidList)}))";
+                    }
                     var innerResult = await Get<QueryResponse<T>, Query>(queryOptions, ct).ConfigureAwait(false);
 
                     if (innerResult != null && innerResult.Error == null && innerResult.Features != null && innerResult.Features.Any())
                     {
-                        result.Features.ToList().AddRange(innerResult.Features);
-                        exceeded = result.ExceededTransferLimit.HasValue && innerResult.ExceededTransferLimit.Value;
+                        oidList = oidList.Concat(innerResult.Features.Select(x => x.ObjectID.ToString()));
+                        result.Features = result.Features.Concat(innerResult.Features);
+                        exceeded = result.ExceededTransferLimit.HasValue 
+                            && innerResult.ExceededTransferLimit.HasValue 
+                            && innerResult.ExceededTransferLimit.Value;
                     }
                     else
                     {
@@ -420,7 +511,7 @@
             int i = 1;
             while (fileInfo.Exists)
             {
-                fileInfo = new FileInfo(Path.Combine(documentLocation, $"rev-{i}-" + attachment.SafeFileName));
+                fileInfo = new FileInfo(Path.Combine(documentLocation, $"rev-{i}-{attachment.SafeFileName}"));
                 i++;
             }
 
@@ -519,8 +610,11 @@
         /// <returns></returns>
         public virtual async Task<FileInfo> DownloadExportMapToLocal(ExportMapResponse exportMapResponse, string folderLocation, string fileName = null)
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(exportMapResponse), exportMapResponse);
-
+            if (exportMapResponse == null)
+            {
+                throw new ArgumentNullException(nameof(exportMapResponse));
+            }
+            
             if (string.IsNullOrWhiteSpace(exportMapResponse.ImageUrl))
             {
                 throw new ArgumentNullException(nameof(exportMapResponse.ImageUrl));
@@ -535,13 +629,13 @@
             {
                 fileName = Guid.NewGuid().ToString();
             }
-            
+
             var response = await _httpClient.GetAsync(exportMapResponse.ImageUrl);
             response.EnsureSuccessStatusCode();
             await response.Content.LoadIntoBufferAsync();
 
             var fileInfo = new FileInfo(Path.Combine(folderLocation, $"{fileName}.{exportMapResponse.ImageFormat}"));
-            
+
             using (var fileStream = new FileStream(fileInfo.FullName, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 await response.Content.CopyToAsync(fileStream);
@@ -551,7 +645,7 @@
 
             return new FileInfo(fileInfo.FullName);
         }
-        
+
         void CheckRefererHeader(string referrer)
         {
             if (_httpClient == null || string.IsNullOrWhiteSpace(referrer))
@@ -571,8 +665,15 @@
             where TRequest : ArcGISServerOperation
             where T : IPortalResponse
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(requestObject), requestObject);
-            LiteGuard.Guard.AgainstNullArgumentProperty(nameof(requestObject), nameof(requestObject.Endpoint), requestObject.Endpoint);
+            if (requestObject == null)
+            {
+                throw new ArgumentNullException(nameof(requestObject));
+            }
+
+            if (requestObject.Endpoint == null)
+            {
+                throw new ArgumentNullException(nameof(requestObject.Endpoint));
+            }
 
             var endpoint = requestObject.Endpoint;
             var url = endpoint.BuildAbsoluteUrl(RootUrl) + AsRequestQueryString(Serializer, requestObject);
@@ -652,8 +753,15 @@
             where TRequest : ArcGISServerOperation
             where T : IPortalResponse
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(requestObject), requestObject);
-            LiteGuard.Guard.AgainstNullArgumentProperty(nameof(requestObject), nameof(requestObject.Endpoint), requestObject.Endpoint);
+            if (requestObject == null)
+            {
+                throw new ArgumentNullException(nameof(requestObject));
+            }
+
+            if (requestObject.Endpoint == null)
+            {
+                throw new ArgumentNullException(nameof(requestObject.Endpoint));
+            }
 
             requestObject.BeforeRequest?.Invoke();
 
@@ -744,8 +852,15 @@
 
         internal static string AsRequestQueryString<T>(ISerializer serializer, T objectToConvert) where T : ArcGISServerOperation
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(serializer), serializer);
-            LiteGuard.Guard.AgainstNullArgument(nameof(objectToConvert), objectToConvert);
+            if (serializer == null)
+            {
+                throw new ArgumentNullException(nameof(serializer));
+            }
+
+            if (objectToConvert == null)
+            {
+                throw new ArgumentNullException(nameof(objectToConvert));
+            }
 
             var dictionary = serializer.AsDictionary(objectToConvert);
 

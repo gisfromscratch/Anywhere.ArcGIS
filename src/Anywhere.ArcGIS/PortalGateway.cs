@@ -35,17 +35,45 @@
                 throw new ArgumentNullException(nameof(rootUrl), "rootUrl is null.");
             }
 
-            var info = await new PortalGateway(rootUrl, serializer: serializer, httpClientFunc: httpClientFunc).Info(ct);
+            var gateway = new PortalGateway(rootUrl, serializer: serializer, httpClientFunc: httpClientFunc);
+            var info = await gateway.Info(ct);
 
-            var result = new PortalGateway(
+            if (info == null)
+            {
+                throw new Exception($"Unable to get ArcGIS Server information for {gateway.RootUrl}. Check the ArcGIS Server URL and try again.");
+            }
+
+            ITokenProvider tokenProvider = null;
+            if (!string.IsNullOrWhiteSpace(info.OwningSystemUrl) && (info.OwningSystemUrl.StartsWith("http://www.arcgis.com", StringComparison.OrdinalIgnoreCase) || info.OwningSystemUrl.StartsWith("https://www.arcgis.com", StringComparison.OrdinalIgnoreCase)))
+            {
+                tokenProvider = new ArcGISOnlineTokenProvider(username, password, serializer: serializer, httpClientFunc: httpClientFunc);
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(info.AuthenticationInfo?.TokenServicesUrl))
+                {
+                    if (!info.AuthenticationInfo.TokenServicesUrl.StartsWith(gateway.RootUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        tokenProvider = new FederatedTokenProvider(
+                            new ServerFederatedWithPortalTokenProvider(info.AuthenticationInfo.TokenServicesUrl.Replace("/generateToken", ""), username, password, serializer: serializer, httpClientFunc: httpClientFunc),
+                            info.AuthenticationInfo.TokenServicesUrl.Replace("/generateToken", ""),
+                            gateway.RootUrl,
+                            referer: info.AuthenticationInfo.TokenServicesUrl.Replace("/sharing/rest/generateToken", "/rest"),
+                            serializer: serializer, 
+                            httpClientFunc: httpClientFunc);
+                    }
+                    else
+                    {
+                        tokenProvider = new TokenProvider(info.AuthenticationInfo?.TokenServicesUrl, username, password, serializer: serializer, httpClientFunc: httpClientFunc);
+                    }
+                }
+            }
+
+            return new PortalGateway(
                 rootUrl,
-                tokenProvider: !string.IsNullOrWhiteSpace(info.OwningSystemUrl) && (info.OwningSystemUrl.StartsWith("http://www.arcgis.com", StringComparison.OrdinalIgnoreCase) || info.OwningSystemUrl.StartsWith("https://www.arcgis.com", StringComparison.OrdinalIgnoreCase))
-                    ? new ArcGISOnlineTokenProvider(username, password)
-                    : new TokenProvider(info.AuthenticationInfo?.TokenServicesUrl, username, password),
+                tokenProvider: tokenProvider,
                 serializer: serializer,
                 httpClientFunc: httpClientFunc);
-
-            return result;
         }
 
         public PortalGateway(string rootUrl, ISerializer serializer = null, ITokenProvider tokenProvider = null, Func<HttpClient> httpClientFunc = null)
@@ -136,11 +164,17 @@
             result.Add(folderDescription);
 
             if (folderDescription.Folders != null)
+            {
                 foreach (var folder in folderDescription.Folders)
                 {
-                    if (ct.IsCancellationRequested) return result;
+                    if (ct.IsCancellationRequested)
+                    {
+                        return result;
+                    }
+
                     result.AddRange(await DescribeEndpoint(new ArcGISServerOperation((operation.Endpoint.RelativeUrl + folder).AsEndpoint()), ct).ConfigureAwait(false));
                 }
+            }
 
             return result;
         }
@@ -153,9 +187,16 @@
         /// <returns>A collection of service description details</returns>
         public virtual Task<List<ServiceDescriptionDetailsResponse>> DescribeServices(SiteDescription siteDescription, CancellationToken ct = default(CancellationToken))
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(siteDescription), siteDescription);
-            LiteGuard.Guard.AgainstNullArgumentProperty(nameof(siteDescription), nameof(siteDescription.Services) , siteDescription.Services);
+            if (siteDescription == null)
+            {
+                throw new ArgumentNullException(nameof(siteDescription));
+            }
 
+            if (siteDescription.Services == null)
+            {
+                throw new ArgumentNullException(nameof(siteDescription.Services));
+            }
+          
             return DescribeServices(siteDescription.Services.ToList(), ct);
         }
 
@@ -167,7 +208,10 @@
         /// <returns>A collection of service description details</returns>
         public virtual async Task<List<ServiceDescriptionDetailsResponse>> DescribeServices(List<ServiceDescription> services, CancellationToken ct = default(CancellationToken))
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(services), services);
+            if (services == null)
+            {
+                throw new ArgumentNullException(nameof(services));
+            }
 
             var result = new List<ServiceDescriptionDetailsResponse>();
 
@@ -187,22 +231,12 @@
         /// <returns>The service description details</returns>
         public virtual Task<ServiceDescriptionDetailsResponse> DescribeService(IEndpoint serviceEndpoint, CancellationToken ct = default(CancellationToken))
         {
-            LiteGuard.Guard.AgainstNullArgument(nameof(serviceEndpoint), serviceEndpoint);
+            if (serviceEndpoint == null)
+            {
+                throw new ArgumentNullException(nameof(serviceEndpoint));
+            }
 
             return Get<ServiceDescriptionDetailsResponse, ServiceDescriptionDetails>(new ServiceDescriptionDetails(serviceEndpoint), ct);
-        }
-
-        /// <summary>
-        /// Return the layer description details for the requested endpoint
-        /// </summary>
-        /// <param name="layerEndpoint"></param>
-        /// <param name="ct"></param>
-        /// <returns>The layer description details</returns>
-        public virtual Task<ServiceLayerDescriptionResponse> DescribeLayer(IEndpoint layerEndpoint, CancellationToken ct = default(CancellationToken))
-        {
-            LiteGuard.Guard.AgainstNullArgument(nameof(layerEndpoint), layerEndpoint);
-
-            return Get<ServiceLayerDescriptionResponse, ServiceLayerDescription>(new ServiceLayerDescription(layerEndpoint), ct);
         }
 
         /// <summary>
@@ -274,7 +308,7 @@
         /// </summary>
         /// <param name="serviceDescription">Service description usually generated from a previous call to DescribeSite</param>
         /// <param name="ct">Optional cancellation token to cancel pending request</param>
-        /// <returns>The statistics for the server</returns>
+        /// <returns>The statistics for the service</returns>
         public virtual Task<ServiceStatisticsResponse> ServiceStatistics(ServiceDescription serviceDescription, CancellationToken ct = default(CancellationToken))
         {
             return Get<ServiceStatisticsResponse, ServiceStatistics>(new ServiceStatistics(serviceDescription), ct);
@@ -298,8 +332,33 @@
         /// <param name="ct">Optional cancellation token to cancel pending request</param>
         /// <returns></returns>
         public virtual Task<SingleInputGeocodeResponse> Geocode(SingleInputGeocode geocode, CancellationToken ct = default(CancellationToken))
-        {
+        {            
             return Get<SingleInputGeocodeResponse, SingleInputGeocode>(geocode, ct);
+        }
+
+        /// <summary>
+        /// The CustomGeocode (FindAddressCandidates) operation supports searching for places and addresses in single-field format.
+        /// This method assumes the results are points.
+        /// </summary>
+        /// <param name="geocode"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public virtual Task<SingleInputCustomGeocodeResponse<Point>> CustomGeocode(SingleInputCustomGeocode geocode, CancellationToken ct = default(CancellationToken))
+        {
+            return CustomGeocode<Point>(geocode, ct);
+        }
+
+        /// <summary>
+        /// The CustomGeocode (FindAddressCandidates) operation supports searching for places and addresses in single-field format
+        /// </summary>
+        /// <typeparam name="T">The geometry type for the result set</typeparam>
+        /// <param name="geocode"></param>
+        /// <param name="ct"></param>
+        /// <returns></returns>
+        public virtual Task<SingleInputCustomGeocodeResponse<T>> CustomGeocode<T>(SingleInputCustomGeocode geocode, CancellationToken ct = default(CancellationToken))
+            where T : IGeometry
+        {
+            return Get<SingleInputCustomGeocodeResponse<T>, SingleInputCustomGeocode>(geocode, ct);
         }
 
         /// <summary>
@@ -318,7 +377,7 @@
         /// the geometry string on the result set e.g.
         /// foreach (var result in response.Results.Where(r => r.Geometry != null))
         /// {
-        ///     result.Geometry = ServiceStack.Text.JsonSerializer.DeserializeFromString(result.Geometry.SerializeToString(), TypeMap[result.GeometryType]());
+        ///     result.Geometry = JsonConvert.DeserializeObject(result.Geometry.ToString(), GeometryTypes.ToTypeMap[result.GeometryType]());
         /// }
         /// </summary>
         /// <param name="findOptions"></param>

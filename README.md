@@ -13,7 +13,7 @@ This is a netstandard 2.0 library, it was ported from [ArcGIS.PCL](https://githu
 
 A typical use case would be the need to call some ArcGIS REST resource from server .NET code or maybe a console app. The features that this returns can be used directly as Esri JSON in JavaScript apps using the Esri JS API.
 
-Works with secure and non-secure ArcGIS Server on premise / in the cloud, Portal for ArcGIS and ArcGIS Online. Also supports converting GeoJSON <-> ArcGIS Features.
+Works with secure and non-secure ArcGIS Server on premise / in the cloud, Portal for ArcGIS and ArcGIS Online. Also supports converting GeoJSON :left_right_arrow: ArcGIS Features.
 
 ### Quickstart
 
@@ -57,6 +57,7 @@ Supports the following as typed operations:
  - `ApplyEdits` post adds, updates and deletes to a feature service layer
  - `DeleteFeatures` delete features in a feature layer or table
  - `Geocode` single line of input to perform a geocode using a custom locator or the Esri world locator
+ - `CustomGeocode` single line of input to perform a geocode using a custom locator
  - `Suggest` lightweight geocode operation that only returns text results, commonly used for predictive searching
  - `ReverseGeocode` find location candidates for a input point location
  - `Simplify` alter geometries to be topologically consistent
@@ -68,6 +69,7 @@ Supports the following as typed operations:
  - `DeleteAttachments` delete attachments that are associated with a feature
  - `Ping` verify that the server can be accessed
  - `Info` return the server information such as version and token authentication settings
+ - `DescribeLegends` return legend information of layers
  - `DescribeServices` return services information (name, sublayers etc.)
  - `DescribeService` return service information (name, sublayers etc.)
  - `DescribeLayer` return layer information
@@ -82,6 +84,7 @@ REST admin operations:
  - `ServiceReport` - admin operation to get the service report
  - `StartService` - admin operation to start a service
  - `StopService` - admin operation to stop a service
+ - `ServiceStatistics` - admin operation to get the statistics of a service
 
 There are also methods to add / update and download attachments for a feature and you can extend this library by writing your own operations.
 
